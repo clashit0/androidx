@@ -16,6 +16,7 @@
 
 package androidx.compose.material3
 
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.AnchoredDraggableDefaults
@@ -36,17 +37,22 @@ import androidx.compose.material3.SheetValue.PartiallyExpanded
 import androidx.compose.material3.internal.Strings
 import androidx.compose.material3.internal.draggableAnchors
 import androidx.compose.material3.internal.getString
+import androidx.compose.material3.tokens.MotionSchemeKeyTokens
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.collapse
 import androidx.compose.ui.semantics.dismiss
@@ -62,54 +68,17 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 /**
- * [Material Design standard bottom sheet
- * scaffold](https://m3.material.io/components/bottom-sheets/overview)
+ * CompositionLocal that holds the measured height of the bottom bar (in pixels).
+ * Used internally to adjust the bottom sheet's anchor positions.
+ */
+internal val LocalBottomBarHeightPx = compositionLocalOf { 0f }
+
+/**
+ * Modified version of [BottomSheetScaffold] that supports a [bottomBar].
+ * The bottom sheet will slide above the bottom bar and never cover it.
  *
- * Standard bottom sheets co-exist with the screen’s main UI region and allow for simultaneously
- * viewing and interacting with both regions. They are commonly used to keep a feature or secondary
- * content visible on screen when content in main UI region is frequently scrolled or panned.
- *
- * ![Bottom sheet
- * image](https://developer.android.com/images/reference/androidx/compose/material3/bottom_sheet.png)
- *
- * This component provides API to put together several material components to construct your screen,
- * by ensuring proper layout strategy for them and collecting necessary data so these components
- * will work together correctly.
- *
- * A simple example of a standard bottom sheet looks like this:
- *
- * @sample androidx.compose.material3.samples.SimpleBottomSheetScaffoldSample
- * @param sheetContent the content of the bottom sheet
- * @param modifier the [Modifier] to be applied to the root of the scaffold
- * @param scaffoldState the state of the bottom sheet scaffold
- * @param sheetPeekHeight the height of the bottom sheet when it is collapsed
- * @param sheetMaxWidth [Dp] that defines what the maximum width the sheet will take. Pass in
- *   [Dp.Unspecified] for a sheet that spans the entire screen width.
- * @param sheetShape the shape of the bottom sheet
- * @param sheetContainerColor the background color of the bottom sheet
- * @param sheetContentColor the preferred content color provided by the bottom sheet to its
- *   children. Defaults to the matching content color for [sheetContainerColor], or if that is not a
- *   color from the theme, this will keep the same content color set above the bottom sheet.
- * @param sheetTonalElevation when [sheetContainerColor] is [ColorScheme.surface], a translucent
- *   primary color overlay is applied on top of the container. A higher tonal elevation value will
- *   result in a darker color in light theme and lighter color in dark theme. See also: [Surface].
- * @param sheetShadowElevation the shadow elevation of the bottom sheet
- * @param sheetDragHandle optional visual marker to pull the scaffold's bottom sheet
- * @param sheetSwipeEnabled whether the sheet swiping is enabled and should react to the user's
- *   input
- * @param topBar top app bar of the screen, typically a [TopAppBar]
- * @param snackbarHost component to host [Snackbar]s that are pushed to be shown via
- *   [SnackbarHostState.showSnackbar], typically a [SnackbarHost]
- * @param containerColor the color used for the background of this scaffold. Use [Color.Transparent]
- *   to have no color.
- * @param contentColor the preferred color for content inside this scaffold. Defaults to either the
- *   matching content color for [containerColor], or to the current [LocalContentColor] if
- *   [containerColor] is not a color from the theme.
- * @param content content of the screen. The lambda receives a [PaddingValues] that should be
- *   applied to the content root via [androidx.compose.foundation.layout.padding] and
- *   [androidx.compose.foundation.layout.consumeWindowInsets] to properly offset top and bottom
- *   bars. If using [androidx.compose.foundation.verticalScroll], apply this modifier to the child
- *   of the scroll, and not on the scroll itself.
+ * @param bottomBar optional bottom bar (e.g., [NavigationBar] or [BottomAppBar]) to be placed at
+ * the very bottom of the screen. The bottom sheet will respect its height.
  */
 @Composable
 @ExperimentalMaterial3Api
@@ -127,14 +96,13 @@ fun BottomSheetScaffold(
     sheetDragHandle: @Composable (() -> Unit)? = { BottomSheetDefaults.DragHandle() },
     sheetSwipeEnabled: Boolean = true,
     topBar: @Composable (() -> Unit)? = null,
+    bottomBar: @Composable (() -> Unit)? = null,          // <-- NEW parameter
     snackbarHost: @Composable (SnackbarHostState) -> Unit = { SnackbarHost(it) },
     containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = contentColorFor(containerColor),
     content: @Composable (PaddingValues) -> Unit,
 ) {
     Box(modifier.fillMaxSize().background(containerColor)) {
-        // Using composition local provider instead of Surface as Surface implements .clip() which
-        // intercepts touch events in testing.
         CompositionLocalProvider(LocalContentColor provides contentColor) {
             BottomSheetScaffoldLayout(
                 topBar = topBar,
@@ -143,6 +111,8 @@ fun BottomSheetScaffold(
                 sheetOffset = { scaffoldState.bottomSheetState.requireOffset() },
                 sheetState = scaffoldState.bottomSheetState,
                 bottomSheet = {
+                    // The bottom bar height is provided via CompositionLocal
+                    val bottomBarHeightPx = LocalBottomBarHeightPx.current
                     StandardBottomSheet(
                         state = scaffoldState.bottomSheetState,
                         peekHeight = sheetPeekHeight,
@@ -154,20 +124,16 @@ fun BottomSheetScaffold(
                         tonalElevation = sheetTonalElevation,
                         shadowElevation = sheetShadowElevation,
                         dragHandle = sheetDragHandle,
+                        bottomBarHeightPx = bottomBarHeightPx,   // <-- pass measured height
                         content = sheetContent,
                     )
                 },
+                bottomBar = bottomBar,
             )
         }
     }
 }
 
-/**
- * State of the [BottomSheetScaffold] composable.
- *
- * @param bottomSheetState the state of the persistent bottom sheet
- * @param snackbarHostState the [SnackbarHostState] used to show snackbars inside the scaffold
- */
 @ExperimentalMaterial3Api
 @Stable
 class BottomSheetScaffoldState(
@@ -175,47 +141,29 @@ class BottomSheetScaffoldState(
     val snackbarHostState: SnackbarHostState,
 )
 
-/**
- * Create and [remember] a [BottomSheetScaffoldState].
- *
- * @param bottomSheetState the state of the standard bottom sheet. See
- *   [rememberStandardBottomSheetState]
- * @param snackbarHostState the [SnackbarHostState] used to show snackbars inside the scaffold
- */
 @Composable
 @ExperimentalMaterial3Api
 fun rememberBottomSheetScaffoldState(
     bottomSheetState: SheetState = rememberStandardBottomSheetState(),
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
-): BottomSheetScaffoldState {
-    return remember(bottomSheetState, snackbarHostState) {
-        BottomSheetScaffoldState(
-            bottomSheetState = bottomSheetState,
-            snackbarHostState = snackbarHostState,
-        )
-    }
+): BottomSheetScaffoldState = remember(bottomSheetState, snackbarHostState) {
+    BottomSheetScaffoldState(
+        bottomSheetState = bottomSheetState,
+        snackbarHostState = snackbarHostState,
+    )
 }
 
-/**
- * Create and [remember] a [SheetState] for [BottomSheetScaffold].
- *
- * @param initialValue the initial value of the state. Should be either [PartiallyExpanded] or
- *   [Expanded] if [skipHiddenState] is true
- * @param confirmValueChange optional callback invoked to confirm or veto a pending state change
- * @param [skipHiddenState] whether Hidden state is skipped for [BottomSheetScaffold]
- */
 @Composable
 @ExperimentalMaterial3Api
 fun rememberStandardBottomSheetState(
     initialValue: SheetValue = PartiallyExpanded,
     confirmValueChange: (SheetValue) -> Boolean = { true },
     skipHiddenState: Boolean = true,
-) =
-    rememberSheetState(
-        confirmValueChange = confirmValueChange,
-        initialValue = initialValue,
-        skipHiddenState = skipHiddenState,
-    )
+) = rememberSheetState(
+    confirmValueChange = confirmValueChange,
+    initialValue = initialValue,
+    skipHiddenState = skipHiddenState,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -230,12 +178,12 @@ private fun StandardBottomSheet(
     tonalElevation: Dp,
     shadowElevation: Dp,
     dragHandle: @Composable (() -> Unit)?,
+    bottomBarHeightPx: Float,   // <-- NEW: measured bottom bar height in pixels
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    // TODO Load the motionScheme tokens from the component tokens file
-    val showMotion = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
-    val hideMotion = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
-    val spatialFlingSpec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
+    val showMotion: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.defaultSpatialSpec()
+    val hideMotion: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.fastEffectsSpec()
+    val spatialFlingSpec: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.defaultSpatialSpec()
 
     SideEffect {
         state.showMotionSpec = showMotion
@@ -267,89 +215,75 @@ private fun StandardBottomSheet(
         } else {
             Modifier
         }
+
     Surface(
-        modifier =
-            Modifier.widthIn(max = sheetMaxWidth)
-                .fillMaxWidth()
-                .requiredHeightIn(min = peekHeight)
-                .then(nestedScroll)
-                .draggableAnchors(state.anchoredDraggableState, orientation) {
-                    sheetSize,
-                    constraints ->
-                    val layoutHeight = constraints.maxHeight.toFloat()
-                    val sheetHeight = sheetSize.height.toFloat()
+        modifier = Modifier
+            .widthIn(max = sheetMaxWidth)
+            .fillMaxWidth()
+            .requiredHeightIn(min = peekHeight)
+            .then(nestedScroll)
+            .draggableAnchors(state.anchoredDraggableState, orientation) { sheetSize, constraints ->
+                // The total height available for the sheet is the layout height minus the bottom bar height
+                val layoutHeight = constraints.maxHeight.toFloat()
+                val effectiveLayoutHeight = layoutHeight - bottomBarHeightPx
+                val sheetHeight = sheetSize.height.toFloat()
 
-                    val newAnchors = DraggableAnchors {
-                        val isHiddenAnchorAvailable =
-                            sheetHeight == 0f || peekHeightPx == 0f || !state.skipHiddenState
+                val newAnchors = DraggableAnchors {
+                    val isHiddenAnchorAvailable =
+                        sheetHeight == 0f || peekHeightPx == 0f || !state.skipHiddenState
 
-                        // We are preserving ambiguous anchor reconciliation for first layout pass.
-                        // This handles the use case where sheetPeekHeight is backed by a mutable
-                        // value which is backed by 0.dp before being recalculated. We can assume
-                        // the state is in its first pass by asserting anchor sizes are zero, as we
-                        // enforce at least 1 anchor below. We then settle at partial as this is
-                        // the anchor external users have access to via sheetPeekHeight API.
-                        val isInitialLayout = state.anchoredDraggableState.anchors.size == 0
-                        val isStableAtPartial =
-                            state.currentValue == PartiallyExpanded && !state.isAnimationRunning
+                    val isInitialLayout = state.anchoredDraggableState.anchors.size == 0
+                    val isStableAtPartial =
+                        state.currentValue == PartiallyExpanded && !state.isAnimationRunning
 
-                        val isAmbiguousPartialAllowed =
-                            peekHeightPx == 0f && (isInitialLayout || isStableAtPartial)
+                    val isAmbiguousPartialAllowed =
+                        peekHeightPx == 0f && (isInitialLayout || isStableAtPartial)
 
-                        val isPartiallyExpandedAnchorAvailable =
-                            !state.skipPartiallyExpanded &&
+                    val isPartiallyExpandedAnchorAvailable =
+                        !state.skipPartiallyExpanded &&
                                 (peekHeightPx > 0f || isAmbiguousPartialAllowed) &&
                                 peekHeightPx != sheetHeight
 
-                        val isExpandedAnchorAvailable = sheetHeight > 0f
+                    val isExpandedAnchorAvailable = sheetHeight > 0f
 
-                        require(
-                            isHiddenAnchorAvailable ||
-                                isPartiallyExpandedAnchorAvailable ||
-                                isExpandedAnchorAvailable
-                        ) {
-                            "BottomSheetScaffold: Require at least 1 anchor to be initialized"
-                        }
-
-                        if (isPartiallyExpandedAnchorAvailable) {
-                            PartiallyExpanded at (layoutHeight - peekHeightPx)
-                        }
-                        if (isHiddenAnchorAvailable) {
-                            Hidden at layoutHeight
-                        }
-                        if (isExpandedAnchorAvailable) {
-                            Expanded at layoutHeight - sheetHeight
-                        }
+                    require(
+                        isHiddenAnchorAvailable || isPartiallyExpandedAnchorAvailable || isExpandedAnchorAvailable
+                    ) {
+                        "BottomSheetScaffold: Require at least 1 anchor to be initialized"
                     }
-                    val newTarget =
-                        when (val oldTarget = state.targetValue) {
-                            Hidden -> if (newAnchors.hasPositionFor(Hidden)) Hidden else oldTarget
-                            PartiallyExpanded ->
-                                when {
-                                    newAnchors.hasPositionFor(PartiallyExpanded) ->
-                                        PartiallyExpanded
 
-                                    newAnchors.hasPositionFor(Expanded) -> Expanded
-                                    newAnchors.hasPositionFor(Hidden) -> Hidden
-                                    else -> oldTarget
-                                }
-
-                            Expanded ->
-                                if (newAnchors.hasPositionFor(Expanded)) Expanded else Hidden
-                        }
-                    return@draggableAnchors newAnchors to newTarget
+                    if (isPartiallyExpandedAnchorAvailable) {
+                        PartiallyExpanded at (effectiveLayoutHeight - peekHeightPx)
+                    }
+                    if (isHiddenAnchorAvailable) {
+                        // Hidden = sheet completely scrolled off-screen above the bottom bar
+                        Hidden at effectiveLayoutHeight
+                    }
+                    if (isExpandedAnchorAvailable) {
+                        Expanded at maxOf(effectiveLayoutHeight - sheetHeight, 0f)
+                    }
                 }
-                .anchoredDraggable(
-                    state = state.anchoredDraggableState,
-                    orientation = orientation,
-                    enabled = sheetSwipeEnabled,
-                    flingBehavior = anchoredDraggableFlingBehavior,
-                )
-                // Scale up the Surface vertically in case the sheet's offset overflows below the
-                // min anchor. This is done to avoid showing a gap when the sheet opens and bounces
-                // when it's applied with a bouncy motion. Note that the content inside the Surface
-                // is scaled back down to maintain its aspect ratio (see below).
-                .verticalScaleUp(state),
+
+                val newTarget = when (val oldTarget = state.targetValue) {
+                    Hidden -> if (newAnchors.hasPositionFor(Hidden)) Hidden else oldTarget
+                    PartiallyExpanded -> when {
+                        newAnchors.hasPositionFor(PartiallyExpanded) -> PartiallyExpanded
+                        newAnchors.hasPositionFor(Expanded) -> Expanded
+                        newAnchors.hasPositionFor(Hidden) -> Hidden
+                        else -> oldTarget
+                    }
+                    Expanded -> if (newAnchors.hasPositionFor(Expanded)) Expanded else Hidden
+                }
+
+                return@draggableAnchors newAnchors to newTarget
+            }
+            .anchoredDraggable(
+                state = state.anchoredDraggableState,
+                orientation = orientation,
+                enabled = sheetSwipeEnabled,
+                flingBehavior = anchoredDraggableFlingBehavior,
+            )
+            .verticalScaleUp(state, bottomBarHeightPx),
         shape = shape,
         color = containerColor,
         contentColor = contentColor,
@@ -357,68 +291,51 @@ private fun StandardBottomSheet(
         shadowElevation = shadowElevation,
     ) {
         Column(
-            Modifier.fillMaxWidth()
-                // Scale the content down in case the sheet offset overflows below the min anchor.
-                // The wrapping Surface is scaled up, so this is done to maintain the content's
-                // aspect ratio.
-                .verticalScaleDown(state)
+            Modifier
+                .fillMaxWidth()
+                .verticalScaleDown(state, bottomBarHeightPx)
         ) {
             if (dragHandle != null) {
-                val partialExpandActionLabel =
-                    getString(Strings.BottomSheetPartialExpandDescription)
+                val partialExpandActionLabel = getString(Strings.BottomSheetPartialExpandDescription)
                 val dismissActionLabel = getString(Strings.BottomSheetDismissDescription)
                 val expandActionLabel = getString(Strings.BottomSheetExpandDescription)
                 DragHandleWithTooltip(
-                    modifier =
-                        Modifier.clickable {
-                                when (state.currentValue) {
-                                    Expanded ->
-                                        scope.launch {
-                                            if (!state.skipHiddenState) {
-                                                state.hide()
-                                            } else {
-                                                state.partialExpand()
-                                            }
-                                        }
-
-                                    PartiallyExpanded -> scope.launch { state.expand() }
-                                    else -> scope.launch { state.show() }
+                    modifier = Modifier
+                        .clickable {
+                            when (state.currentValue) {
+                                Expanded -> scope.launch {
+                                    if (!state.skipHiddenState) state.hide() else state.partialExpand()
                                 }
+                                PartiallyExpanded -> scope.launch { state.expand() }
+                                else -> scope.launch { state.show() }
                             }
-                            .semantics(mergeDescendants = true) {
-                                with(state) {
-                                    // Provides semantics to interact with the bottomsheet if
-                                    // there is more than one anchor to swipe to and swiping is
-                                    // enabled.
-                                    if (
-                                        anchoredDraggableState.anchors.size > 1 && sheetSwipeEnabled
-                                    ) {
-                                        if (currentValue == PartiallyExpanded) {
-                                            expand(expandActionLabel) {
-                                                val canExpand = confirmValueChange(Expanded)
-                                                if (canExpand) {
-                                                    scope.launch { expand() }
-                                                }
-                                                return@expand canExpand
-                                            }
-                                        } else {
-                                            collapse(partialExpandActionLabel) {
-                                                val canPartiallyExpand =
-                                                    confirmValueChange(PartiallyExpanded)
-                                                scope.launch { partialExpand() }
-                                                return@collapse canPartiallyExpand
-                                            }
+                        }
+                        .semantics(mergeDescendants = true) {
+                            with(state) {
+                                if (anchoredDraggableState.anchors.size > 1 && sheetSwipeEnabled) {
+                                    if (currentValue == PartiallyExpanded) {
+                                        expand(expandActionLabel) {
+                                            val canExpand = confirmValueChange(Expanded)
+                                            if (canExpand) scope.launch { expand() }
+                                            return@expand canExpand
                                         }
-                                        if (!state.skipHiddenState) {
-                                            dismiss(dismissActionLabel) {
-                                                val canHide = confirmValueChange(Hidden)
-                                                scope.launch { hide() }
-                                                return@dismiss canHide
-                                            }
+                                    } else {
+                                        collapse(partialExpandActionLabel) {
+                                            val canPartiallyExpand = confirmValueChange(PartiallyExpanded)
+                                            scope.launch { partialExpand() }
+                                            return@collapse canPartiallyExpand
+                                        }
+                                    }
+                                    if (!state.skipHiddenState) {
+                                        dismiss(dismissActionLabel) {
+                                            val canHide = confirmValueChange(Hidden)
+                                            scope.launch { hide() }
+                                            return@dismiss canHide
                                         }
                                     }
                                 }
-                            },
+                            }
+                        },
                     content = dragHandle,
                 )
             }
@@ -427,6 +344,10 @@ private fun StandardBottomSheet(
     }
 }
 
+/**
+ * Modified layout that uses [SubcomposeLayout] to first measure the bottom bar,
+ * then provides its height to the sheet composition.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BottomSheetScaffoldLayout(
@@ -434,47 +355,89 @@ private fun BottomSheetScaffoldLayout(
     body: @Composable () -> Unit,
     bottomSheet: @Composable () -> Unit,
     snackbarHost: @Composable () -> Unit,
+    bottomBar: @Composable (() -> Unit)?,
     sheetOffset: () -> Float,
     sheetState: SheetState,
 ) {
-    Layout(
-        contents = listOf<@Composable () -> Unit>(topBar ?: {}, body, bottomSheet, snackbarHost)
-    ) {
-        (topBarMeasurables, bodyMeasurables, bottomSheetMeasurables, snackbarHostMeasurables),
-        constraints ->
+    SubcomposeLayout { constraints ->
         val layoutWidth = constraints.maxWidth
         val layoutHeight = constraints.maxHeight
         val looseConstraints = constraints.copy(minWidth = 0, minHeight = 0)
 
-        val sheetPlaceables = bottomSheetMeasurables.fastMap { it.measure(looseConstraints) }
+        // Step 1: Measure bottom bar (if present) to get its height
+        val bottomBarPlaceables = subcompose("bottomBar") {
+            bottomBar?.let { Box { it() } } ?: Box {}
+        }.map { it.measure(looseConstraints) }
+        val bottomBarHeight = bottomBarPlaceables.fastMaxOfOrNull { it.height } ?: 0
 
-        val topBarPlaceables = topBarMeasurables.fastMap { it.measure(looseConstraints) }
+        // Step 2: Provide the measured height to the sheet composition via CompositionLocal
+        val sheetPlaceables = subcompose("sheet") {
+            CompositionLocalProvider(LocalBottomBarHeightPx provides bottomBarHeight.toFloat()) {
+                bottomSheet()
+            }
+        }.map { measurable ->
+            // The sheet is constrained to the area above the bottom bar
+            val sheetConstraints = looseConstraints.copy(maxHeight = layoutHeight - bottomBarHeight)
+            measurable.measure(sheetConstraints)
+        }
+
+        // Step 3: Measure the rest (top bar, body, snackbar)
+        val topBarPlaceables = subcompose("topBar") {
+            topBar?.let { Box { it() } } ?: Box {}
+        }.map { it.measure(looseConstraints) }
         val topBarHeight = topBarPlaceables.fastMaxOfOrNull { it.height } ?: 0
 
         val bodyConstraints = looseConstraints.copy(maxHeight = layoutHeight - topBarHeight)
-        val bodyPlaceables = bodyMeasurables.fastMap { it.measure(bodyConstraints) }
+        val bodyPlaceables = subcompose("body") { body() }
+            .map { it.measure(bodyConstraints) }
 
-        val snackbarPlaceables = snackbarHostMeasurables.fastMap { it.measure(looseConstraints) }
+        val snackbarPlaceables = subcompose("snackbar") { snackbarHost() }
+            .map { it.measure(looseConstraints) }
 
         layout(layoutWidth, layoutHeight) {
+            // Placement
             val sheetWidth = sheetPlaceables.fastMaxOfOrNull { it.width } ?: 0
             val sheetOffsetX = max(0, (layoutWidth - sheetWidth) / 2)
+
+            val sheetOffsetPx = sheetOffset().roundToInt()
+            val sheetY = layoutHeight - bottomBarHeight - sheetOffsetPx
 
             val snackbarWidth = snackbarPlaceables.fastMaxOfOrNull { it.width } ?: 0
             val snackbarHeight = snackbarPlaceables.fastMaxOfOrNull { it.height } ?: 0
             val snackbarOffsetX = (layoutWidth - snackbarWidth) / 2
-            val snackbarOffsetY =
-                when (sheetState.currentValue) {
-                    PartiallyExpanded -> sheetOffset().roundToInt() - snackbarHeight
-                    Expanded,
-                    Hidden -> layoutHeight - snackbarHeight
-                }
+            val snackbarOffsetY = when (sheetState.currentValue) {
+                PartiallyExpanded -> sheetY - snackbarHeight
+                Expanded, Hidden -> layoutHeight - bottomBarHeight - snackbarHeight
+            }
 
-            // Placement order is important for elevation
+            // Z-order: body -> top bar -> bottom bar -> sheet -> snackbar
             bodyPlaceables.fastForEach { it.placeRelative(0, topBarHeight) }
             topBarPlaceables.fastForEach { it.placeRelative(0, 0) }
-            sheetPlaceables.fastForEach { it.placeRelative(sheetOffsetX, 0) }
+            bottomBarPlaceables.fastForEach { it.placeRelative(0, layoutHeight - bottomBarHeight) }
+            sheetPlaceables.fastForEach { it.placeRelative(sheetOffsetX, sheetY) }
             snackbarPlaceables.fastForEach { it.placeRelative(snackbarOffsetX, snackbarOffsetY) }
         }
     }
+}
+
+// --- Helper scaling modifiers adjusted for bottom bar height ---
+
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun Modifier.verticalScaleUp(state: SheetState, bottomBarHeightPx: Float) = graphicsLayer {
+    val offset = state.anchoredDraggableState.offset
+    // The min anchor is now the Hidden anchor (effectiveLayoutHeight), not 0.
+    // We need to compute overflow relative to the expanded anchor (the smallest offset)
+    val minAnchor = state.anchoredDraggableState.anchors.minPosition()
+    val overflow = if (offset < minAnchor) minAnchor - offset else 0f
+    scaleY = if (overflow > 0f) (size.height + overflow) / size.height else 1f
+    transformOrigin = TransformOrigin(pivotFractionX = 0.5f, pivotFractionY = 0f)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun Modifier.verticalScaleDown(state: SheetState, bottomBarHeightPx: Float) = graphicsLayer {
+    val offset = state.anchoredDraggableState.offset
+    val minAnchor = state.anchoredDraggableState.anchors.minPosition()
+    val overflow = if (offset < minAnchor) minAnchor - offset else 0f
+    scaleY = if (overflow > 0f) 1f / ((size.height + overflow) / size.height) else 1f
+    transformOrigin = TransformOrigin(pivotFractionX = 0.5f, pivotFractionY = 0f)
 }
